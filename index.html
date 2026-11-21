@@ -105,6 +105,11 @@ textarea{resize:vertical;min-height:66px}
 #doc table.kop-t{margin:0!important;overflow:visible}
 #doc .kop{margin-bottom:6px}
 
+.keybox{background:#f7fbfa;border:1.5px solid #bfe3dc;border-radius:14px;padding:12px;margin:-2px 0 14px}
+.key-row{display:flex;gap:6px}
+.key-row input{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px}
+#keyStatus.ok{color:var(--accent)} #keyStatus.no{color:var(--warn)}
+
 /* AI tiles */
 #ai{display:none}
 .ai-group{font-size:11.5px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:4px 0 8px}
@@ -394,6 +399,13 @@ footer{text-align:center;font-size:12.5px;color:var(--muted);padding:0 20px 30px
       </select>
       <div class="ai-group">⚡ Otomatis di halaman ini</div>
       <div class="tiles" id="tilesAuto"></div>
+      <div class="keybox" id="keyBox" hidden>
+        <label for="apiKey">🔑 Kunci API Claude (Anthropic)</label>
+        <div class="key-row"><input type="password" id="apiKey" placeholder="sk-ant-…" autocomplete="off" spellcheck="false"><button type="button" id="keyToggle" class="btn btn-ghost btn-sm">Lihat</button></div>
+        <label class="chip" style="margin-top:8px"><input type="checkbox" id="keyRemember" checked>Ingat di browser ini</label>
+        <div class="hint" id="keyStatus" style="font-weight:600"></div>
+        <div class="hint">Buat kunci di <b>console.anthropic.com</b> → <i>API Keys</i>. Biaya dipotong dari saldo akun API Anda (terpisah dari langganan Claude.ai). Kunci hanya dikirim ke <b>api.anthropic.com</b>. Jangan simpan kunci di komputer umum/bersama.</div>
+      </div>
       <div class="ai-group">🔗 AI lain · salin prompt → tempel hasil</div>
       <div class="tiles sm" id="tilesManual"></div>
       <div class="tiles" id="tilesOff"></div>
@@ -609,16 +621,84 @@ const badge=$("aiBadge");
 (async()=>{
   await null;
   try{ sample = window.claude && await window.claude.use("sample"); }catch(e){ sample=null; }
-  if(sample){ badge.textContent="✦ Claude aktif · 15 pilihan AI"; badge.className="badge"; }
-  else{
-    badge.textContent="Claude otomatis tidak tersedia"; badge.className="badge off";
-    $("ai").querySelectorAll('option[value^="claude-"]').forEach(o=>{o.disabled=true;});
+  aiReady=true;
+  if(!sample && keyMode){ $("keyBox").hidden=false; }
+  refreshClaude();
+  if(!sample && !keyMode){
     if($("ai").value.startsWith("claude-")) $("ai").value="m:chatgpt";
     const n=$("modeNote"); n.hidden=false;
-    n.textContent="Claude otomatis tidak tersedia di tampilan ini. Anda tetap bisa memakai ChatGPT, Gemini, Copilot, DeepSeek, dan AI lain (salin prompt, lalu tempel hasilnya), atau templat bawaan. Buka halaman ini di claude.ai untuk memakai Claude secara otomatis.";
+    n.textContent="Claude otomatis tidak tersedia di tampilan ini. Anda tetap bisa memakai ChatGPT, Gemini, Copilot, DeepSeek, dan AI lain (salin prompt, lalu tempel hasilnya), atau templat bawaan. Buka halaman ini di claude.ai, atau unduh file index.html dan isi kunci API Claude, untuk memakai Claude secara otomatis.";
   }
   updAiHint();
 })();
+
+/* ---------- Claude lewat kunci API (file mandiri) ---------- */
+let aiReady=false, keyMode=false;
+try{ keyMode = window.top===window.self; }catch(e){ keyMode=false; }
+const getKey=()=>($("apiKey").value||"").trim();
+const claudeOK=()=>!!sample || (keyMode && /^sk-ant-/.test(getKey()));
+function refreshClaude(){
+  const ok=claudeOK();
+  $("ai").querySelectorAll('option[value^="claude-"]').forEach(o=>{o.disabled=!ok;});
+  if(sample){ badge.textContent="✦ Claude aktif · 15 pilihan AI"; badge.className="badge"; }
+  else if(ok){ badge.textContent="✦ Claude aktif lewat kunci API"; badge.className="badge"; }
+  else { badge.textContent = keyMode ? "Isi kunci API untuk memakai Claude" : "Claude otomatis tidak tersedia"; badge.className="badge off"; }
+  if(keyMode && !sample){
+    const k=getKey(), st=$("keyStatus");
+    st.className="hint "+(ok?"ok":(k?"no":""));
+    st.textContent = ok ? "✓ Kunci terpasang — kartu Claude siap dipakai." : (k ? "Format kunci tidak dikenali (harus diawali sk-ant-)." : "Belum ada kunci — kartu Claude masih nonaktif.");
+  }
+  document.dispatchEvent(new Event("ai-avail"));
+  if(aiReady) updAiHint();
+}
+try{ const k=load("ma_key"); if(k){ $("apiKey").value=k; } if(load("ma_key_rem")==="0") $("keyRemember").checked=false; }catch(e){}
+function persistKey(){
+  if($("keyRemember").checked){ store("ma_key",getKey()); store("ma_key_rem","1"); }
+  else { try{ localStorage.removeItem("ma_key"); }catch(e){} store("ma_key_rem","0"); }
+}
+$("apiKey").addEventListener("input",()=>{ persistKey(); refreshClaude(); });
+$("keyRemember").addEventListener("change",persistKey);
+$("keyToggle").addEventListener("click",()=>{ const i=$("apiKey"); const show=i.type==="password"; i.type=show?"text":"password"; $("keyToggle").textContent=show?"Sembunyikan":"Lihat"; });
+
+async function callClaudeAPI(prompt, model, signal, onText){
+  let resp;
+  try{
+    resp = await fetch("https://api.anthropic.com/v1/messages",{method:"POST",signal,
+      headers:{"x-api-key":getKey(),"anthropic-version":"2023-06-01","content-type":"application/json","anthropic-dangerous-direct-browser-access":"true"},
+      body:JSON.stringify({model,max_tokens:16000,stream:true,messages:[{role:"user",content:prompt}]})});
+  }catch(e){
+    if(e && e.name==="AbortError") throw e;
+    throw {message:"Tidak dapat terhubung ke api.anthropic.com. Periksa koneksi internet Anda."};
+  }
+  if(!resp.ok){
+    let msg=""; try{ const j=await resp.json(); msg=j?.error?.message||""; }catch(e){}
+    const st=resp.status;
+    if(st===401) throw {message:"Kunci API tidak valid. Periksa kembali kunci Anda di console.anthropic.com."};
+    if(st===403) throw {message:"Kunci API tidak memiliki izin untuk model ini."};
+    if(st===404) throw {message:"Model "+model+" tidak ditemukan untuk akun Anda. Coba pilih model Claude lain."};
+    if(st===429) throw {code:"rate_limited",message:"Batas penggunaan API tercapai."};
+    if(st===529||st===503) throw {message:"Server Claude sedang sibuk. Coba lagi beberapa saat."};
+    if(/credit balance/i.test(msg)) throw {message:"Saldo kredit API Anda habis. Isi saldo di console.anthropic.com → Billing."};
+    throw {message:`Error ${st}${msg?": "+msg:""}`};
+  }
+  const reader=resp.body.getReader(), dec=new TextDecoder();
+  let buf="", text="", stop=null, used=model;
+  while(true){
+    const {value,done}=await reader.read(); if(done) break;
+    buf+=dec.decode(value,{stream:true});
+    let i;
+    while((i=buf.indexOf("\n\n"))>=0){
+      const chunk=buf.slice(0,i); buf=buf.slice(i+2);
+      const line=chunk.split("\n").find(l=>l.startsWith("data:")); if(!line) continue;
+      let ev; try{ ev=JSON.parse(line.slice(5).trim()); }catch(e){ continue; }
+      if(ev.type==="message_start" && ev.message?.model) used=ev.message.model;
+      else if(ev.type==="content_block_delta" && ev.delta?.type==="text_delta"){ text+=ev.delta.text; onText && onText({text}); }
+      else if(ev.type==="message_delta" && ev.delta?.stop_reason) stop=ev.delta.stop_reason;
+      else if(ev.type==="error") throw {message:ev.error?.message||"Terjadi kesalahan dari server Claude."};
+    }
+  }
+  return {text, truncated: stop==="max_tokens", modelApplied: used};
+}
 
 /* ---------- Pilihan AI ---------- */
 const AI_SITES={
@@ -637,7 +717,7 @@ const AI_SITES={
 function aiLabel(v){ const o=$("ai").querySelector(`option[value="${v}"]`); return o?o.textContent.split(" — ")[0]:v; }
 function updAiHint(){
   const v=$("ai").value, h=$("aiHint");
-  if(v.startsWith("claude-")) h.textContent = sample ? "Modul ditulis langsung di halaman ini." : "Tidak tersedia di tampilan ini — pilih AI lain.";
+  if(v.startsWith("claude-")) h.textContent = sample ? "Modul ditulis langsung di halaman ini." : (claudeOK() ? "Modul ditulis langsung lewat kunci API Anda." : (keyMode ? "Isi kunci API Claude di bawah untuk mengaktifkan." : "Tidak tersedia di tampilan ini — pilih AI lain."));
   else if(v.startsWith("m:")) h.textContent = "Anda akan menyalin prompt ke "+AI_SITES[v.slice(2)][0]+", lalu menempelkan hasilnya kembali ke sini.";
   else h.textContent = "Tanpa AI: kerangka modul dari templat, beberapa bagian perlu dilengkapi manual.";
   $("genLabel").textContent = labelBtn();
@@ -978,15 +1058,20 @@ async function generate(){
   const ai=$("ai").value;
   if(ai.startsWith("m:")){ openManual(d,ai.slice(2)); setStatus("Ikuti 3 langkah pada panel di samping."); return; }
   $("manual").hidden=true;
-  if(ai==="template" || !sample){ render(d,templateModul(d)); setStatus("Modul dibuat dari templat. Bagian bertanda [ ] perlu dilengkapi."); return; }
+  if(ai.startsWith("claude-") && !claudeOK() && keyMode && !sample){
+    setStatus("Isi kunci API Claude dulu (bagian ⑥ Pilih Mesin AI).",true); $("keyBox").hidden=false; $("apiKey").focus(); return;
+  }
+  if(ai==="template" || !claudeOK()){ render(d,templateModul(d)); setStatus("Modul dibuat dari templat. Bagian bertanda [ ] perlu dilengkapi."); return; }
   const opt=$("ai").selectedOptions[0], tier=opt.dataset.tier||"default", name=aiLabel(ai);
   busy=true; const btn=$("genBtn"); btn.disabled=true; btn.classList.add("loading");
   $("genLabel").textContent="Menyusun modul…"; $("progress").classList.add("on");
   setStatus(name+" sedang menulis modul ajar Anda (biasanya 30–90 detik)…");
   ctrl=new AbortController();
   try{
-    const res=await sample(buildPrompt(d),{model:ai,modelTier:tier,signal:ctrl.signal,cache:false,
-      onText:({text})=>{ const n=(text||"").length; if(n>50) setStatus(`${name} menulis… ${Math.round(n/1000)} rb karakter`); }});
+    const onText=({text})=>{ const n=(text||"").length; if(n>50) setStatus(`${name} menulis… ${Math.round(n/1000)} rb karakter`); };
+    const res = sample
+      ? await sample(buildPrompt(d),{model:ai,modelTier:tier,signal:ctrl.signal,cache:false,onText})
+      : await callClaudeAPI(buildPrompt(d),ai,ctrl.signal,onText);
     let M;
     try{ M=parseJSON(res.text); }
     catch(e){ throw {message: res.truncated ? "Jawaban terpotong karena terlalu panjang. Coba kurangi jumlah pertemuan." : "Hasil tidak dapat dibaca. Silakan coba lagi."}; }
@@ -1105,6 +1190,7 @@ document.addEventListener("click",e=>{
   sel.value=t.dataset.v; sel.dispatchEvent(new Event("change",{bubbles:true})); sync();
 });
 sel.addEventListener("change",sync);
+document.addEventListener("ai-avail",sync);
 sync(); let n=0; const iv=setInterval(()=>{sync(); if(++n>24) clearInterval(iv);},500);
 
 /* Meter kelengkapan */
